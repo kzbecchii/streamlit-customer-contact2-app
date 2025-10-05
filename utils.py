@@ -247,10 +247,18 @@ def execute_agent_or_chain(chat_message):
     # AIエージェント機能を利用する場合
     if st.session_state.agent_mode == ct.AI_AGENT_MODE_ON:
         # LLMによる回答をストリーミング出力するためのオブジェクトを用意
-        st_callback = StreamlitCallbackHandler(st.container())
-        # Agent Executorの実行（AIエージェント機能を使う場合は、Toolとして設定した関数内で会話履歴への追加処理を実施）
-        result = st.session_state.agent_executor.invoke({"input": chat_message}, {"callbacks": [st_callback]})
-        response = result["output"]
+        try:
+            st_callback = StreamlitCallbackHandler(st.container())
+            # Agent Executorの実行（AIエージェント機能を使う場合は、Toolとして設定した関数内で会話履歴への追加処理を実施）
+            result = st.session_state.agent_executor.invoke({"input": chat_message}, {"callbacks": [st_callback]})
+            response = result["output"]
+        except Exception as e:
+            # Streamlit のセッションコンテキストが別スレッドで利用できない等の例外が出た場合、
+            # コールバック無しで実行し直す（ストリーミング表示は行われないが処理は継続する）
+            logger = logging.getLogger(ct.LOGGER_NAME)
+            logger.warning(f"StreamlitCallbackHandler failed ({e}), retrying without callbacks")
+            result = st.session_state.agent_executor.invoke({"input": chat_message})
+            response = result.get("output") if isinstance(result, dict) else result
     # AIエージェントを利用しない場合
     else:
         # RAGのChainを実行

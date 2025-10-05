@@ -31,7 +31,7 @@ def display_sidebar():
         col1, col2 = st.columns([100, 1])
         with col1:
             st.session_state.agent_mode = st.selectbox(
-                label="",
+                    label="エージェント利用選択",
                 options=[ct.AI_AGENT_MODE_ON, ct.AI_AGENT_MODE_OFF],
                 label_visibility="collapsed"
             )
@@ -41,7 +41,7 @@ def display_sidebar():
         col1, col2 = st.columns([100, 1])
         with col1:
             st.session_state.contact_mode = st.selectbox(
-                label="",
+                label="問い合わせモード選択",
                 options=[ct.CONTACT_MODE_OFF, ct.CONTACT_MODE_ON],
                 label_visibility="collapsed"
             )
