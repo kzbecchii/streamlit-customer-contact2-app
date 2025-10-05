@@ -149,6 +149,13 @@ def initialize_agent_executor():
             func=search.run,
             description=ct.SEARCH_WEB_INFO_TOOL_DESCRIPTION
         )
+        ,
+        # Business hours tool
+        Tool(
+            name=ct.SEARCH_BUSINESS_HOURS_TOOL_NAME,
+            func=utils.run_business_hours_tool,
+            description=ct.SEARCH_BUSINESS_HOURS_TOOL_DESCRIPTION
+        )
     ]
 
     # Agent Executorの作成

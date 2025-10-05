@@ -75,6 +75,17 @@ ENCODING_KIND = "cl100k_base"
 
 
 # ==========================================
+# 営業時間 / SLA（簡易設定）
+# ==========================================
+BUSINESS_HOURS = {
+    "weekday": "9:00-18:00",
+    "weekend": "10:00-17:00",
+    "holidays": "休業"
+}
+DEFAULT_SLA_HOURS = 72  # 初動（営業時間換算での目安：72時間=3営業日程度）
+
+
+# ==========================================
 # RAG参照用のデータソース系
 # ==========================================
 RAG_TOP_FOLDER_PATH = "./data/rag"
@@ -112,15 +123,20 @@ CONTACT_MODE_OFF = "OFF"
 SEARCH_COMPANY_INFO_TOOL_NAME = "search_company_info_tool"
 SEARCH_COMPANY_INFO_TOOL_DESCRIPTION = "自社「株式会社EcoTee」に関する情報を参照したい時に使う"
 SEARCH_SERVICE_INFO_TOOL_NAME = "search_service_info_tool"
-SEARCH_SERVICE_INFO_TOOL_DESCRIPTION = "自社サービス「EcoTee」に関する情報を参照したい時に使う"
+SEARCH_SERVICE_INFO_TOOL_DESCRIPTION = "自社「株式会社EcoTee」のサービス、商品に関する情報を参照したい時に使う"
 SEARCH_CUSTOMER_COMMUNICATION_INFO_TOOL_NAME = "search_customer_communication_tool"
 SEARCH_CUSTOMER_COMMUNICATION_INFO_TOOL_DESCRIPTION = "顧客とのやりとりに関する情報を参照したい時に使う"
 SEARCH_WEB_INFO_TOOL_NAME = "search_web_tool"
 SEARCH_WEB_INFO_TOOL_DESCRIPTION = "自社サービス「HealthX」に関する質問で、Web検索が必要と判断した場合に使う"
+SEARCH_CUSTOMER_HISTORY_TOOL_NAME = "search_customer_history_tool"
+SEARCH_CUSTOMER_HISTORY_TOOL_DESCRIPTION = "顧客の過去問い合わせ履歴を要約して参照したい時に使う"
+SEARCH_BUSINESS_HOURS_TOOL_NAME = "business_hours_tool"
+SEARCH_BUSINESS_HOURS_TOOL_DESCRIPTION = "営業時間や初動目安（SLA）に関する定型回答を返すツール"
 
 
 # ==========================================
 # Slack連携関連
+
 # ==========================================
 EMPLOYEE_FILE_PATH = "./data/slack/従業員情報.csv"
 INQUIRY_HISTORY_FILE_PATH = "./data/slack/問い合わせ対応履歴.csv"
@@ -185,11 +201,11 @@ SYSTEM_PROMPT_NOTICE_SLACK = """
 
 
     # 命令
-    Slackの「動作検証用」チャンネルで、メンバーIDが{slack_id_text}のメンバーに一度だけメンションを当て、生成したメッセージを送信してください。
+    Slackの「テスト」チャンネルで、メンバーIDが{slack_id_text}のメンバーに一度だけメンションを当て、生成したメッセージを送信してください。
 
 
     # 送信先のチャンネル名
-    動作検証用
+    テスト
 
 
     # メッセージの通知先
@@ -251,6 +267,11 @@ SYSTEM_PROMPT_NOTICE_SLACK = """
     ＜3つ目＞
     ●内容: 
     ●根拠: 
+
+    --------------------
+
+    【メンション先の選定理由】
+    ・例: 棚橋由香里さんは、技術部の課長として、過去に同様の問い合わせに対応した経験があり、品質管理とテスト実施に関する専門知識を持っています。
 
     --------------------
 

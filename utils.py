@@ -32,6 +32,8 @@ from langchain.output_parsers import CommaSeparatedListOutputParser
 from langchain import LLMChain
 import datetime
 import constants as ct
+import sqlite3
+from pathlib import Path
 
 
 ############################################################
@@ -173,7 +175,7 @@ def run_company_doc_chain(param):
 
 def run_service_doc_chain(param):
     """
-    サービスに関するデータ参照に特化したTool設定用の関数
+    サービスと商品に関するデータ参照に特化したTool設定用の関数
 
     Args:
         param: ユーザー入力値
@@ -524,6 +526,112 @@ def get_datetime():
     return now_datetime
 
 
+def search_faq(q, top_k=3):
+    """
+    FAQ DB を検索して上位候補を返す（MATCH → LIKE フォールバック）
+
+    Args:
+        q: クエリ文字列
+        top_k: 取得件数
+
+    Returns:
+        [{id, category, question, snippet, url}, ...]
+    """
+    db_path = Path(__file__).resolve().parents[0] / ".db_faq" / "faq.db"
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    # try FTS MATCH
+    try:
+        cur.execute("SELECT id, category, question, answer, url FROM faq WHERE faq MATCH ? LIMIT ?", (q, top_k))
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+    # fallback to LIKE if no rows
+    if not rows:
+        like_q = f"%{q}%"
+        cur.execute("SELECT id, category, question, answer, url FROM faq WHERE question LIKE ? OR answer LIKE ? LIMIT ?",
+                    (like_q, like_q, top_k))
+        rows = cur.fetchall()
+
+    results = []
+    for r in rows:
+        combined = (r[2] or "") + "\n" + (r[3] or "")
+        # simple snippet: first 200 chars or around query
+        snippet = combined
+        if len(snippet) > 200:
+            snippet = snippet[:200] + "..."
+        results.append({
+            'id': r[0],
+            'category': r[1],
+            'question': r[2],
+            'snippet': snippet,
+            'url': r[4]
+        })
+    conn.close()
+    return results
+
+
+def get_customer_history_summary(customer_id=None, customer_name=None, limit=5):
+    """
+    問い合わせ対応履歴CSVから顧客の過去履歴を抽出して簡易サマリを返す
+
+    Args:
+        customer_id: 顧客ID（優先）
+        customer_name: 顧客名（顧客IDが無い場合の代替）
+        limit: 取得する最近の履歴件数
+
+    Returns:
+        {found: bool, summary: str, recent_interactions: [{date, subject, excerpt, ref_row}], count: int}
+    """
+    import csv
+    from pathlib import Path
+
+    csv_path = Path(__file__).resolve().parents[0] / "data" / "slack" / "問い合わせ対応履歴.csv"
+    if not csv_path.exists():
+        return {"found": False, "summary": "履歴ファイルが見つかりません。", "recent_interactions": [], "count": 0}
+
+    records = []
+    with open(csv_path, newline='', encoding=ct.CSV_ENCODING) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # CSV のカラム名に依存するため、存在しない場合はスキップ
+            records.append(row)
+
+    # フィルタリング
+    matched = []
+    for r in records:
+        # try customer_id match
+        if customer_id and (r.get('顧客ID') == customer_id or r.get('customer_id') == customer_id):
+            matched.append(r)
+            continue
+        # try customer_name match
+        if customer_name and (r.get('顧客名') == customer_name or r.get('name') == customer_name):
+            matched.append(r)
+
+    if not matched:
+        return {"found": False, "summary": "該当する顧客の履歴は見つかりませんでした。", "recent_interactions": [], "count": 0}
+
+    # 最近の履歴順（CSV内の日時カラム名がわからないため、降順はそのまま最後の方を最近と仮定）
+    recent = matched[-limit:][::-1]
+
+    recent_interactions = []
+    combined_texts = []
+    for r in recent:
+        date = r.get('日時') or r.get('date') or r.get('timestamp') or ''
+        subject = r.get('件名') or r.get('タイトル') or r.get('subject') or ''
+        body = r.get('内容') or r.get('本文') or r.get('message') or ''
+        excerpt = (body[:200] + '...') if len(body) > 200 else body
+        combined_texts.append(f"{date} {subject} {excerpt}")
+        recent_interactions.append({"date": date, "subject": subject, "excerpt": excerpt, "ref_row": r})
+
+    # 簡易サマリは最近の件名と抜粋をまとめたもの（後で LLM 要約に差し替え可能）
+    summary = "\n".join(combined_texts)
+
+    return {"found": True, "summary": summary, "recent_interactions": recent_interactions, "count": len(matched)}
+
+
 def preprocess_func(text):
     """
     形態素解析による日本語の単語分割
@@ -565,3 +673,29 @@ def adjust_string(s):
     
     # OSがWindows以外の場合はそのまま返す
     return s
+
+
+def run_business_hours_tool(param: str):
+    """
+    営業時間やSLAに関する定型回答を返すツールラッパー
+
+    Args:
+        param: ユーザークエリ（自然文）
+
+    Returns:
+        str: 人間向けの回答テキスト
+    """
+    q = (param or '').lower()
+    hours = ct.BUSINESS_HOURS
+    sla = ct.DEFAULT_SLA_HOURS
+
+    # キーワード判定
+    if '営業時間' in q or '何時' in q or 'open' in q:
+        return f"平日: {hours['weekday']}、土日: {hours['weekend']}、祝日: {hours['holidays']}。"
+    if '初動' in q or '対応時間' in q or 'sla' in q:
+        return f"初動の目安は原則{sla}時間（約3営業日）です。緊急の場合はお問い合わせください。"
+    if '土曜' in q or '土日' in q or '週末' in q:
+        return f"週末の営業時間は {hours['weekend']} です。"
+
+    # デフォルトの案内
+    return f"営業時間は平日 {hours['weekday']}、週末 {hours['weekend']} です。初動の目安は原則{sla}時間です。"

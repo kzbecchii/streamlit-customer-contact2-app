@@ -108,14 +108,33 @@ if chat_message:
     # ==========================================
     # 2. LLMからの回答取得 or 問い合わせ処理
     # ==========================================
+    # まずFAQを検索して候補を提示（該当があればユーザーがFAQで解決できるか選べる）
+    faq_results = utils.search_faq(chat_message)
+    use_faq = False
+    if faq_results:
+        with st.expander("該当しそうなFAQが見つかりました。こちらで解決しましたか？"):
+            for i, r in enumerate(faq_results, start=1):
+                st.markdown(f"**{i}. {r['question']}**  ")
+                st.markdown(r['snippet'])
+                if r.get('url'):
+                    st.markdown(f"参照: {r['url']}")
+                if st.button(f"このFAQで解決しました ({i})"):
+                    use_faq = True
+                    chosen_faq = r
+                    break
+
     res_box = st.empty()
     try:
-        if st.session_state.contact_mode == ct.CONTACT_MODE_OFF:
-            with st.spinner(ct.SPINNER_TEXT):
-                result = utils.execute_agent_or_chain(chat_message)
+        if use_faq:
+            # FAQで解決した場合は、その内容を回答として表示し、LLM呼び出しはスキップ
+            result = f"FAQで解決しました:\n{chosen_faq['question']}\n{chosen_faq['snippet']}\n参照: {chosen_faq.get('url','') }"
         else:
-            with st.spinner(ct.SPINNER_CONTACT_TEXT):
-                result = utils.notice_slack(chat_message)
+            if st.session_state.contact_mode == ct.CONTACT_MODE_OFF:
+                with st.spinner(ct.SPINNER_TEXT):
+                    result = utils.execute_agent_or_chain(chat_message)
+            else:
+                with st.spinner(ct.SPINNER_CONTACT_TEXT):
+                    result = utils.notice_slack(chat_message)
     except Exception as e:
         logger.error(f"{ct.MAIN_PROCESS_ERROR_MESSAGE}\n{e}")
         st.error(utils.build_error_message(ct.MAIN_PROCESS_ERROR_MESSAGE), icon=ct.ERROR_ICON)
