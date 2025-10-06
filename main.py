@@ -10,6 +10,7 @@ import logging
 import streamlit as st
 import utils
 from initialize import initialize
+import initialize as initialize_module
 import components as cn
 import constants as ct
 
@@ -87,6 +88,11 @@ if chat_message:
     # 会話履歴の上限を超えた場合、受け付けない
     # ==========================================
     # ユーザーメッセージのトークン数を取得
+    # 'enc' は遅延初期化される可能性があるため、存在しない場合は
+    # 軽量な初期化（エンコーダと簡易LLM）を行ってから使用する。
+    if "enc" not in st.session_state:
+        initialize_module.initialize_agent_executor()
+
     input_tokens = len(st.session_state.enc.encode(chat_message))
     # トークン数が、受付上限を超えている場合にエラーメッセージを表示
     if input_tokens > ct.MAX_ALLOWED_TOKENS:
@@ -130,9 +136,13 @@ if chat_message:
             result = f"FAQで解決しました:\n{chosen_faq['question']}\n{chosen_faq['snippet']}\n参照: {chosen_faq.get('url','') }"
         else:
             if st.session_state.contact_mode == ct.CONTACT_MODE_OFF:
+                # 重いリソース（RAGチェーンやAgent）が未作成の場合は遅延初期化
+                if "rag_chain" not in st.session_state or "agent_executor" not in st.session_state:
+                    initialize_module.initialize_heavy_resources()
                 with st.spinner(ct.SPINNER_TEXT):
                     result = utils.execute_agent_or_chain(chat_message)
             else:
+                # 問い合わせモードは Slack 通知。Slack 用の Agent を作る処理は notice_slack 内で行われるため遅延化済み
                 with st.spinner(ct.SPINNER_CONTACT_TEXT):
                     result = utils.notice_slack(chat_message)
     except Exception as e:

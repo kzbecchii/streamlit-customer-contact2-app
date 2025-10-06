@@ -42,8 +42,8 @@ def initialize():
     initialize_session_id()
     # ログ出力の設定
     initialize_logger()
-    # Agent Executorを作成
-    initialize_agent_executor()
+    # Agent Executor 等の重いリソースは起動時に作成せず遅延初期化とする
+    # initialize.initialize_heavy_resources() を必要時に呼んでください
 
 
 def initialize_session_state():
@@ -110,12 +110,23 @@ def initialize_agent_executor():
     if "agent_executor" in st.session_state:
         return
     
-    # 消費トークン数カウント用のオブジェクトを用意
+    # 軽量な部分のみを初期化する: トークンエンコードとLLMクライアント
+    # 重いChain/Agentの作成は initialize_heavy_resources() で行う
     st.session_state.enc = tiktoken.get_encoding(ct.ENCODING_KIND)
-    
     st.session_state.llm = ChatOpenAI(model_name=ct.MODEL, temperature=ct.TEMPERATURE, streaming=True)
 
-    # 各Tool用のChainを作成
+
+def initialize_heavy_resources():
+    """
+    重いリソース（RAGチェーン、ツール、Agent Executor）を作成する遅延初期化関数
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+
+    # 既に作成済みなら何もしない
+    if "agent_executor" in st.session_state and "rag_chain" in st.session_state:
+        return
+
+    # 各Tool用のChainを作成（重い処理）
     st.session_state.customer_doc_chain = utils.create_rag_chain(ct.DB_CUSTOMER_PATH)
     st.session_state.service_doc_chain = utils.create_rag_chain(ct.DB_SERVICE_PATH)
     st.session_state.company_doc_chain = utils.create_rag_chain(ct.DB_COMPANY_PATH)
@@ -125,32 +136,26 @@ def initialize_agent_executor():
     search = SerpAPIWrapper()
     # Agent Executorに渡すTool一覧を用意
     tools = [
-        # 会社に関するデータ検索用のTool
         Tool(
             name=ct.SEARCH_COMPANY_INFO_TOOL_NAME,
             func=utils.run_company_doc_chain,
             description=ct.SEARCH_COMPANY_INFO_TOOL_DESCRIPTION
         ),
-        # サービスに関するデータ検索用のTool
         Tool(
             name=ct.SEARCH_SERVICE_INFO_TOOL_NAME,
             func=utils.run_service_doc_chain,
             description=ct.SEARCH_SERVICE_INFO_TOOL_DESCRIPTION
         ),
-        # 顧客とのやり取りに関するデータ検索用のTool
         Tool(
             name=ct.SEARCH_CUSTOMER_COMMUNICATION_INFO_TOOL_NAME,
             func=utils.run_customer_doc_chain,
             description=ct.SEARCH_CUSTOMER_COMMUNICATION_INFO_TOOL_DESCRIPTION
         ),
-        # Web検索用のTool
         Tool(
             name = ct.SEARCH_WEB_INFO_TOOL_NAME,
             func=search.run,
             description=ct.SEARCH_WEB_INFO_TOOL_DESCRIPTION
-        )
-        ,
-        # Business hours tool
+        ),
         Tool(
             name=ct.SEARCH_BUSINESS_HOURS_TOOL_NAME,
             func=utils.run_business_hours_tool,
@@ -158,7 +163,7 @@ def initialize_agent_executor():
         )
     ]
 
-    # Agent Executorの作成
+    # Agent Executorの作成（重い）
     st.session_state.agent_executor = initialize_agent(
         llm=st.session_state.llm,
         tools=tools,
