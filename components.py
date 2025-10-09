@@ -45,6 +45,14 @@ def display_sidebar():
                 options=[ct.CONTACT_MODE_OFF, ct.CONTACT_MODE_ON],
                 label_visibility="collapsed"
             )
+        # 問い合わせモードがONのときは、名前入力欄を表示して依頼者名を取得する
+        if st.session_state.contact_mode == ct.CONTACT_MODE_ON:
+            # 既にセッションに user_name がある場合は初期値として表示
+            initial_name = st.session_state.get('user_name', '')
+            user_name = st.text_input("お問い合わせのご担当者（表示名）", value=initial_name, help="通知に表示するお名前を入力してください。", key="_contact_user_name_input")
+            # 空でない場合はセッションに格納
+            if user_name:
+                st.session_state.user_name = user_name
         
         st.divider()
 
@@ -127,11 +135,34 @@ def display_llm_response(result):
     Args:
         result: LLMからの回答
     """
-    st.markdown(result)
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    # 安全に表示する: None や dict/list など非文字列が来た場合に備える
+    try:
+        if result is None:
+            logger.warning({"display_llm_response": "result is None"})
+            st.markdown(ct.DISPLAY_FAILURE_MESSAGE)
+        else:
+            # 文字列でなければ安全に文字列化して表示する
+            if not isinstance(result, str):
+                logger.info({"display_llm_response_non_str": {"type": type(result).__name__, "repr": str(result) }})
+                safe_text = str(result)
+            else:
+                safe_text = result
+            st.markdown(safe_text)
+    except Exception as e:
+        # 何かしらの表示時エラーが出た場合、ログを残してユーザには汎用メッセージを表示
+        logger.exception("Failed to render LLM response")
+        st.markdown(ct.DISPLAY_FAILURE_MESSAGE)
+
     # フィードバックボタンを表示する場合のみ、メッセージ表示
-    if st.session_state.contact_mode == ct.CONTACT_MODE_OFF:
-        if st.session_state.answer_flg:
+    try:
+        contact_mode = st.session_state.get('contact_mode', ct.CONTACT_MODE_OFF)
+        answer_flg = st.session_state.get('answer_flg', False)
+        if contact_mode == ct.CONTACT_MODE_OFF and answer_flg:
             st.caption(ct.FEEDBACK_REQUIRE_MESSAGE)
+    except Exception:
+        # セッションアクセスが失敗しても表示の主処理は終わっているため、ここでは何もしない
+        logger.exception("Failed to render feedback caption")
 
 
 def display_feedback_button():

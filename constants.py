@@ -7,6 +7,11 @@
 ############################################################
 from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader, TextLoader
 
+# ログ出力系（モジュールインポート時に参照されるため早めに定義）
+LOG_DIR_PATH = "./logs"
+LOGGER_NAME = "ApplicationLog"
+LOG_FILE = "application.log"
+
 
 ############################################################
 # 共通変数の定義
@@ -22,89 +27,63 @@ USER_ICON_FILE_PATH = "./images/user_icon.jpg"
 AI_ICON_FILE_PATH = "./images/ai_icon.jpg"
 WARNING_ICON = ":material/warning:"
 ERROR_ICON = ":material/error:"
-SPINNER_TEXT = "回答生成中..."
-SPINNER_CONTACT_TEXT = "問い合わせ内容を弊社担当者に送信中です。画面を操作せず、このままお待ちください。"
-CONTACT_THANKS_MESSAGE = """
-    このたびはお問い合わせいただき、誠にありがとうございます。
-    担当者が内容を確認し、3営業日以内にご連絡いたします。
-    ただし問い合わせ内容によっては、ご連絡いたしかねる場合がございます。
-    もしお急ぎの場合は、お電話にてご連絡をお願いいたします。
+SYSTEM_PROMPT_NOTICE_SLACK = """
+【問い合わせ情報】
+・問い合わせ内容: {query}
+・カテゴリ: 
+・問い合わせ者: {requester}
+・日時: {now_datetime}
+
+【回答・対応案】
+＜1つ目＞
+●内容: 
+●根拠: 
+
+＜2つ目＞
+●内容: 
+●根拠: 
+
+＜3つ目＞
+●内容: 
+●根拠: 
+
+【メンション先の選定理由】
+ここには問い合わせ内容に基づき、誰に連絡するべきかを「です・ます調」で具体的に記載してください。氏名を含めてください。
+
+【参照資料】
+・従業員情報.csv
+・問い合わせ履歴.csv
 """
 
+# RAG データのトップフォルダと DB パスの定義（不足していた値を補完）
+RAG_TOP_FOLDER_PATH = "./data/rag"
 
-# ==========================================
-# ユーザーフィードバック関連
-# ==========================================
-FEEDBACK_YES = "はい"
-FEEDBACK_NO = "いいえ"
+# 各種 DB パス
+DB_ALL_PATH = "./.db_all"
+DB_COMPANY_PATH = "./.db_company"
 
-SATISFIED = "回答に満足した"
-DISSATISFIED = "回答に満足しなかった"
+# トークン関連のデフォルト
+MAX_ALLOWED_TOKENS = 1000
 
-FEEDBACK_REQUIRE_MESSAGE = "この回答はお役に立ちましたか？フィードバックをいただくことで、生成AIの回答の質が向上します。"
-FEEDBACK_BUTTON_LABEL = "送信"
-FEEDBACK_YES_MESSAGE = "ご満足いただけて良かったです！他にもご質問があれば、お気軽にお尋ねください！"
-FEEDBACK_NO_MESSAGE = "ご期待に添えず申し訳ございません。今後の改善のために、差し支えない範囲でご満足いただけなかった理由を教えていただけますと幸いです。"
-FEEDBACK_THANKS_MESSAGE = "ご回答いただき誠にありがとうございます。"
+# エンコーディング種別（tiktoken 用）
+ENCODING_KIND = "cl100k_base"
+
+# LLM モデル設定（初期値）
+# 実運用では .env や設定ファイルで上書きしてください
+MODEL = "gpt-4o-mini"
+TEMPERATURE = 0.0
 
 
-# ==========================================
 # ログ出力系
-# ==========================================
 LOG_DIR_PATH = "./logs"
 LOGGER_NAME = "ApplicationLog"
 LOG_FILE = "application.log"
 
 
-# ==========================================
-# LLM設定系
-# ==========================================
-MODEL = "gpt-4o-mini"
-TEMPERATURE = 0.5
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 50
-TOP_K = 5
-RETRIEVER_WEIGHTS = [0.5, 0.5]
-
-
-# ==========================================
-# トークン関連
-# ==========================================
-MAX_ALLOWED_TOKENS = 1000
-ENCODING_KIND = "cl100k_base"
-
-
-# ==========================================
-# 営業時間 / SLA（簡易設定）
-# ==========================================
-BUSINESS_HOURS = {
-    "weekday": "9:00-18:00",
-    "weekend": "10:00-17:00",
-    "holidays": "休業"
-}
-DEFAULT_SLA_HOURS = 72  # 初動（営業時間換算での目安：72時間=3営業日程度）
-
-
-# ==========================================
-# RAG参照用のデータソース系
-# ==========================================
 RAG_TOP_FOLDER_PATH = "./data/rag"
-
-SUPPORTED_EXTENSIONS = {
-    ".pdf": PyMuPDFLoader,
-    ".docx": Docx2txtLoader,
-    ".txt": lambda path: TextLoader(path, encoding="utf-8")
-}
 
 DB_ALL_PATH = "./.db_all"
 DB_COMPANY_PATH = "./.db_company"
-
-
-# ==========================================
-# AIエージェント関連
-# ==========================================
-AI_AGENT_MAX_ITERATIONS = 5
-
 DB_SERVICE_PATH = "./.db_service"
 DB_CUSTOMER_PATH = "./.db_customer"
 
@@ -113,6 +92,15 @@ DB_NAMES = {
     DB_SERVICE_PATH: f"{RAG_TOP_FOLDER_PATH}/service",
     DB_CUSTOMER_PATH: f"{RAG_TOP_FOLDER_PATH}/customer"
 }
+
+# 問い合わせモード用の即時サンクスメッセージ
+CONTACT_THANKS_MESSAGE = (
+    "\n    このたびはお問い合わせいただき、誠にありがとうございます。\n"
+    "    担当者が内容を確認し、3営業日以内にご連絡いたします。\n"
+    "    ただし問い合わせ内容によっては、ご連絡いたしかねる場合がございます。\n"
+    "    もしお急ぎの場合は、お電話にてご連絡をお願いいたします。\n"
+
+)
 
 AI_AGENT_MODE_ON = "利用する"
 AI_AGENT_MODE_OFF = "利用しない"
@@ -220,6 +208,9 @@ SYSTEM_PROMPT_NOTICE_SLACK = """
     # メッセージの生成条件
     - 各項目について、できる限り長い文章量で、具体的に生成してください。
 
+        - 【メンション先の選定理由】は必ず「です・ます調（敬体／丁寧体）」で記述し、
+            指示文そのもの（例：「以下の〜で記述してください」など）を出力しないでください。
+
     - 「メッセージフォーマット」を使い、以下の各項目の文章を生成してください。
         - 【問い合わせ情報】の「カテゴリ」
         - 【問い合わせ情報】の「日時」
@@ -250,7 +241,7 @@ SYSTEM_PROMPT_NOTICE_SLACK = """
     【問い合わせ情報】
     ・問い合わせ内容: {query}
     ・カテゴリ: 
-    ・問い合わせ者: 山田太郎
+        ・問い合わせ者: {requester}
     ・日時: {now_datetime}
 
     --------------------
@@ -271,7 +262,7 @@ SYSTEM_PROMPT_NOTICE_SLACK = """
     --------------------
 
     【メンション先の選定理由】
-    ・例: 棚橋由香里さんは、技術部の課長として、過去に同様の問い合わせに対応した経験があり、品質管理とテスト実施に関する専門知識を持っています。
+    （ここに、問い合わせ内容に基づくメンション先の選定理由を「です・ます調」で記載してください。氏名も記載してください。）
 
     --------------------
 
@@ -317,3 +308,54 @@ STYLE = """
     }
 </style>
 """
+
+
+# ==========================================
+# フィードバック関連表示文言
+# ==========================================
+FEEDBACK_YES = "はい"
+FEEDBACK_NO = "いいえ"
+FEEDBACK_BUTTON_LABEL = "送信"
+FEEDBACK_THANKS_MESSAGE = "ご意見を送信いただき、ありがとうございました。"
+FEEDBACK_YES_MESSAGE = "ご評価ありがとうございます。"
+FEEDBACK_NO_MESSAGE = "ご意見の詳細を入力してください。"
+FEEDBACK_REQUIRE_MESSAGE = "この回答は参考になりましたか？ よろしければフィードバックをお願いします。"
+ 
+# フィードバックログ用定数
+SATISFIED = "satisfied"
+DISSATISFIED = "dissatisfied"
+
+
+# ------------------------------------------
+# RAG / Retriever 関連のデフォルト設定
+# ------------------------------------------
+TOP_K = 3
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
+
+# Agent の最大反復回数（initialize_heavy_resources で参照）
+AI_AGENT_MAX_ITERATIONS = 3
+
+# 営業時間関連のデフォルト設定
+BUSINESS_HOURS = {
+    "weekday": "午前9時〜午後6時",
+    "weekend": "午前10時〜午後4時",
+    "holidays": "休業"
+}
+
+# 初動対応の目安（時間）
+DEFAULT_SLA_HOURS = 72
+
+# Document loader のマッピング（拡張子 -> ローダー呼び出し）
+SUPPORTED_EXTENSIONS = {
+    ".pdf": PyMuPDFLoader,
+    ".docx": Docx2txtLoader,
+    ".txt": TextLoader,
+}
+
+
+# Ensemble Retriever の重み（BM25 と ベクトルの重み付け）
+RETRIEVER_WEIGHTS = [0.6, 0.4]
+
+# スピナー表示テキスト
+SPINNER_TEXT = "回答を生成しています... 少々お待ちください。"

@@ -112,7 +112,25 @@ def initialize_agent_executor():
     
     # 軽量な部分のみを初期化する: トークンエンコードとLLMクライアント
     # 重いChain/Agentの作成は initialize_heavy_resources() で行う
-    st.session_state.enc = tiktoken.get_encoding(ct.ENCODING_KIND)
+    # ENCODING_KIND may be missing; use getattr with default and guard tiktoken errors
+    encoding_kind = getattr(ct, 'ENCODING_KIND', None)
+    try:
+        if encoding_kind:
+            st.session_state.enc = tiktoken.get_encoding(encoding_kind)
+        else:
+            raise Exception("ENCODING_KIND not defined")
+    except Exception as e:
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.warning(f"tiktoken encoding unavailable ({e}), using SimpleEncoder fallback")
+        class SimpleEncoder:
+            def encode(self, text):
+                # fallback: split on whitespace as rough token approximation
+                try:
+                    return text.split()
+                except Exception:
+                    return [text]
+        st.session_state.enc = SimpleEncoder()
+
     st.session_state.llm = ChatOpenAI(model_name=ct.MODEL, temperature=ct.TEMPERATURE, streaming=True)
 
 

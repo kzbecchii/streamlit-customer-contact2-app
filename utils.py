@@ -15,7 +15,7 @@ from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
 from langchain.schema import HumanMessage, AIMessage
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import Chroma
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
@@ -24,6 +24,7 @@ from typing import List
 from sudachipy import tokenizer, dictionary
 from langchain_community.agent_toolkits import SlackToolkit
 from langchain.agents import AgentType, initialize_agent
+from slack_sdk import WebClient
 from langchain_community.document_loaders.csv_loader import CSVLoader
 from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
@@ -90,6 +91,9 @@ def create_rag_chain(db_name):
         doc.page_content = adjust_string(doc.page_content)
         for key in doc.metadata:
             doc.metadata[key] = adjust_string(doc.metadata[key])
+
+    # ロードしたドキュメントの要約ログ
+    logger.info({"create_rag_chain_loaded_docs": len(docs_all)})
     
     text_splitter = CharacterTextSplitter(
         chunk_size=ct.CHUNK_SIZE,
@@ -100,11 +104,22 @@ def create_rag_chain(db_name):
 
     embeddings = OpenAIEmbeddings()
 
+    # DB ごとに固有の persist_directory を使う（db_name がパスのケースを想定）
+    persist_dir = os.path.normpath(db_name)
+    try:
+        os.makedirs(persist_dir, exist_ok=True)
+    except Exception:
+        # 冗長だが、作成に失敗したらフォールバックで共通 .db を使う
+        persist_dir = ".db"
+
     # すでに対象のデータベースが作成済みの場合は読み込み、未作成の場合は新規作成する
-    if os.path.isdir(db_name):
-        db = Chroma(persist_directory=".db", embedding_function=embeddings)
+    if os.path.isdir(persist_dir) and any(Path(persist_dir).iterdir()):
+        logger.info({"chroma_load_from": persist_dir})
+        db = Chroma(persist_directory=persist_dir, embedding_function=embeddings)
     else:
-        db = Chroma.from_documents(splitted_docs, embedding=embeddings, persist_directory=".db")
+        logger.info({"chroma_create_at": persist_dir, "doc_count": len(splitted_docs)})
+        db = Chroma.from_documents(splitted_docs, embedding=embeddings, persist_directory=persist_dir)
+
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
 
     question_generator_template = ct.SYSTEM_PROMPT_CREATE_INDEPENDENT_TEXT
@@ -142,18 +157,85 @@ def add_docs(folder_path, docs_all):
         folder_path: フォルダのパス
         docs_all: 各ファイルデータを格納するリスト
     """
-    files = os.listdir(folder_path)
+    try:
+        files = os.listdir(folder_path)
+    except FileNotFoundError:
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.warning({"add_docs_missing_folder": folder_path})
+        return
+
     for file in files:
-        # ファイルの拡張子を取得
-        file_extension = os.path.splitext(file)[1]
+        # ファイルの拡張子を取得・小文字化して判定（例: .PDF を見逃さない）
+        file_extension = os.path.splitext(file)[1].lower()
+        file_path = f"{folder_path}/{file}"
         # 想定していたファイル形式の場合のみ読み込む
         if file_extension in ct.SUPPORTED_EXTENSIONS:
+            logger = logging.getLogger(ct.LOGGER_NAME)
+            logger.info({"add_docs_loading": file_path})
             # ファイルの拡張子に合ったdata loaderを使ってデータ読み込み
-            loader = ct.SUPPORTED_EXTENSIONS[file_extension](f"{folder_path}/{file}")
+            loader = ct.SUPPORTED_EXTENSIONS[file_extension](file_path)
         else:
             continue
-        docs = loader.load()
-        docs_all.extend(docs)
+        try:
+            docs = loader.load()
+            docs_all.extend(docs)
+        except Exception as e:
+            logger = logging.getLogger(ct.LOGGER_NAME)
+            logger.warning({"add_docs_load_failed": file_path, "error": str(e)})
+
+
+def adjust_reference_data(docs, docs_history):
+    """
+    Slack通知用の参照先データの整形
+
+    Args:
+        docs: 従業員情報ファイルの読み込みデータ
+        docs_history: 問い合わせ対応履歴ファイルの読み込みデータ
+
+    Returns:
+        従業員情報と問い合わせ対応履歴の結合テキストを持つドキュメントリスト
+    """
+
+    docs_all = []
+    for row in docs:
+        # 従業員IDの取得（ページコンテンツを行ごとに分割して key: value 形式を期待）
+        row_lines = row.page_content.split("\n")
+        row_dict = {}
+        for item in row_lines:
+            if ": " in item:
+                k, v = item.split(": ", 1)
+                row_dict[k] = v
+        employee_id = row_dict.get("従業員ID", "")
+
+        # 取得した従業員IDに紐づく問い合わせ対応履歴を取得
+        same_employee_inquiries = []
+        for row_history in docs_history:
+            row_history_lines = row_history.page_content.split("\n")
+            row_history_dict = {}
+            for item in row_history_lines:
+                if ": " in item:
+                    k, v = item.split(": ", 1)
+                    row_history_dict[k] = v
+            if row_history_dict.get("従業員ID") == employee_id:
+                same_employee_inquiries.append(row_history_dict)
+
+        new_doc = Document()
+        if same_employee_inquiries:
+            doc_text = "【従業員情報】\n"
+            doc_text += "\n".join(row_lines) + "\n=================================\n"
+            doc_text += "【この従業員の問い合わせ対応履歴】\n"
+            for inquiry_dict in same_employee_inquiries:
+                for key, value in inquiry_dict.items():
+                    doc_text += f"{key}: {value}\n"
+                doc_text += "---------------\n"
+            new_doc.page_content = doc_text
+        else:
+            new_doc.page_content = row.page_content
+
+        new_doc.metadata = {}
+        docs_all.append(new_doc)
+
+    return docs_all
 
 
 def run_company_doc_chain(param):
@@ -225,7 +307,20 @@ def delete_old_conversation_log(result):
     # トークン数が上限値を下回るまで、順に古い会話履歴を削除
     while st.session_state.total_tokens > ct.MAX_ALLOWED_TOKENS:
         # 最も古い会話履歴を削除
-        removed_message = st.session_state.chat_history.pop(1)
+        # safety: ensure there are at least 2 messages (index 1 exists) before popping
+        chat_history = getattr(st.session_state, 'chat_history', None)
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        if not isinstance(chat_history, list):
+            logger.warning("chat_history not a list or not present; aborting deletion loop")
+            break
+        if len(chat_history) <= 1:
+            logger.warning("chat_history too short to pop; aborting deletion loop")
+            break
+        try:
+            removed_message = chat_history.pop(1)
+        except IndexError:
+            logger.warning("IndexError while popping chat_history; aborting deletion loop")
+            break
         # 最も古い会話履歴のトークン数を取得
         removed_tokens = len(st.session_state.enc.encode(removed_message.content))
         # 過去の会話履歴の合計トークン数から、最も古い会話履歴のトークン数を引く
@@ -274,7 +369,51 @@ def execute_agent_or_chain(chat_message):
     return response
 
 
-def notice_slack(chat_message):
+def generate_simple_answer(chat_message: str) -> str:
+    """
+    重いリソース（RAG/Agent）が使えない時のために、軽量なLLMで回答を生成するフォールバック関数
+
+    Args:
+        chat_message: ユーザーメッセージ
+
+    Returns:
+        生成された回答またはエラーメッセージ
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+
+    # まずセッションの LLM を優先
+    llm = getattr(st.session_state, 'llm', None)
+    if llm is None:
+        try:
+            llm = ChatOpenAI(model_name=ct.MODEL, temperature=ct.TEMPERATURE, streaming=False)
+            logger.info("Created local ChatOpenAI instance for fallback simple answer generation")
+        except Exception as e:
+            logger.exception(f"Failed to create local ChatOpenAI for fallback: {e}")
+            return "申し訳ございません。回答の生成中にエラーが発生しました。しばらく経ってから再度お試しください。"
+
+    try:
+        # まず chat-style の呼び出しを試す
+        try:
+            gen = llm([
+                {"role": "system", "content": "あなたは社内文書を元に顧客の問い合わせに回答するアシスタントです。社内データが参照できない場合は一般的な知見に基づいて回答してください。出力は日本語で記載してください。"},
+                {"role": "user", "content": chat_message},
+            ])
+            text = getattr(gen, 'content', None) or (gen[0] if isinstance(gen, (list, tuple)) and gen else None) or str(gen)
+        except Exception:
+            gen = llm(chat_message)
+            text = getattr(gen, 'content', None) or str(gen)
+
+        # 空や None の場合はエラーメッセージにフォールバック
+        if not text:
+            return "申し訳ございません。回答の生成中にエラーが発生しました。しばらく経ってから再度お試しください。"
+
+        return text
+    except Exception as e:
+        logger.exception(f"Simple LLM generation failed: {e}")
+        return "申し訳ございません。回答の生成中にエラーが発生しました。しばらく経ってから再度お試しください。"
+
+
+def notice_slack(chat_message, requester_override=None):
     """
     問い合わせ内容のSlackへの通知
 
@@ -285,14 +424,26 @@ def notice_slack(chat_message):
         問い合わせサンクスメッセージ
     """
 
-    # Slack通知用のAgent Executorを作成
-    toolkit = SlackToolkit()
-    tools = toolkit.get_tools()
-    agent_executor = initialize_agent(
-        llm=st.session_state.llm,
-        tools=tools,
-        agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION
-    )
+    # Slack通知用のAgent Executorを作成（ただしバックグラウンド実行時は st.session_state が利用できないことがある）
+    agent_executor = None
+    try:
+        # session_state.llm がないと例外になるためガード
+        llm_for_agent = getattr(st.session_state, "llm", None)
+        if llm_for_agent is not None:
+            toolkit = SlackToolkit()
+            tools = toolkit.get_tools()
+            agent_executor = initialize_agent(
+                llm=llm_for_agent,
+                tools=tools,
+                agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION
+            )
+        else:
+            # session の LLM が取得できない場合は agent を使わず直接 WebClient にフォールバックする
+            logger = logging.getLogger(ct.LOGGER_NAME)
+            logger.info("st.session_state.llm not available in background; skipping agent creation and using WebClient fallback")
+    except Exception as e:
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.warning(f"Failed to create agent_executor: {e}; will fallback to WebClient")
 
     # 担当者割り振りに使う用の「従業員情報」と「問い合わせ対応履歴」の読み込み
     loader = CSVLoader(ct.EMPLOYEE_FILE_PATH, encoding=ct.CSV_ENCODING)
@@ -347,87 +498,251 @@ def notice_slack(chat_message):
 
     # 問い合わせ内容と関連性が高い従業員のID一覧を取得
     messages = prompt_template.format_prompt(context=context, query=chat_message, format_instruction=format_instruction).to_messages()
-    employee_id_response = st.session_state.llm(messages)
-    employee_ids = output_parser.parse(employee_id_response.content)
+    # バックグラウンド実行時には st.session_state.llm が存在しない可能性があるためガード
+    llm_for_agent = getattr(st.session_state, "llm", None)
+    if llm_for_agent is not None:
+        try:
+            employee_id_response = llm_for_agent(messages)
+            employee_ids = output_parser.parse(employee_id_response.content)
+        except Exception as e:
+            logger = logging.getLogger(ct.LOGGER_NAME)
+            logger.warning(f"Failed to get employee ids via llm: {e}; proceeding without mentions")
+            employee_ids = []
+    else:
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger = logging.getLogger(ct.LOGGER_NAME)
 
-    # 問い合わせ内容と関連性が高い従業員情報を、IDで照合して取得
-    target_employees = get_target_employees(employees, employee_ids)
-    
-    # 問い合わせ内容と関連性が高い従業員情報の中から、SlackIDのみを抽出
-    slack_ids = get_slack_ids(target_employees)
-    
-    # 抽出したSlackIDの連結テキストを生成
-    slack_id_text = create_slack_id_text(slack_ids)
-    
-    # プロンプトに埋め込むための（問い合わせ内容と関連性が高い）従業員情報テキストを取得
-    context = get_context(target_employees)
+        # 1) Agent executor を試す（セッション LLM がバックグラウンドでは使えないことがある）
+        agent_executor = None
+        try:
+            session_llm = getattr(st.session_state, "llm", None)
+            if session_llm is not None:
+                toolkit = SlackToolkit()
+                tools = toolkit.get_tools()
+                agent_executor = initialize_agent(
+                    llm=session_llm,
+                    tools=tools,
+                    agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+                )
+            else:
+                logger.info("st.session_state.llm not available in background; will fallback to WebClient/Local LLM")
+        except Exception as e:
+            logger.warning(f"Failed to initialize agent executor: {e}; continuing with fallback flows")
 
-    # 現在日時を取得
-    now_datetime = get_datetime()
+        # 2) CSV から従業員情報と履歴を読み込む
+        loader = CSVLoader(ct.EMPLOYEE_FILE_PATH, encoding=ct.CSV_ENCODING)
+        docs = loader.load()
+        loader = CSVLoader(ct.INQUIRY_HISTORY_FILE_PATH, encoding=ct.CSV_ENCODING)
+        docs_history = loader.load()
 
-    # Slack通知用のプロンプト生成
-    prompt = PromptTemplate(
-        input_variables=["slack_id_text", "query", "context", "now_datetime"],
-        template=ct.SYSTEM_PROMPT_NOTICE_SLACK,
-    )
-    prompt_message = prompt.format(slack_id_text=slack_id_text, query=chat_message, context=context, now_datetime=now_datetime)
+        for doc in docs:
+            doc.page_content = adjust_string(doc.page_content)
+            for key in doc.metadata:
+                doc.metadata[key] = adjust_string(doc.metadata[key])
+        for doc in docs_history:
+            doc.page_content = adjust_string(doc.page_content)
+            for key in doc.metadata:
+                doc.metadata[key] = adjust_string(doc.metadata[key])
 
-    # Slack通知の実行
-    agent_executor.invoke({"input": prompt_message})
+        docs_all = adjust_reference_data(docs, docs_history)
+        docs_all_page_contents = [d.page_content for d in docs_all]
 
-    return ct.CONTACT_THANKS_MESSAGE
+        # Retriever を作成して候補従業員を取得
+        embeddings = OpenAIEmbeddings()
+        db = Chroma.from_documents(docs_all, embedding=embeddings)
+        vector_retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
+        bm25_retriever = BM25Retriever.from_texts(docs_all_page_contents, preprocess_func=preprocess_func, k=ct.TOP_K)
+        ensemble_retriever = EnsembleRetriever(retrievers=[bm25_retriever, vector_retriever], weights=ct.RETRIEVER_WEIGHTS)
 
+        employees = ensemble_retriever.invoke(chat_message)
 
-def adjust_reference_data(docs, docs_history):
-    """
-    Slack通知用の参照先データの整形
+        # LLM による候補絞り込み（可能なら実行）
+        employee_ids = []
+        try:
+            prompt_template = ChatPromptTemplate.from_messages([("system", ct.SYSTEM_PROMPT_EMPLOYEE_SELECTION)])
+            output_parser = CommaSeparatedListOutputParser()
+            format_instruction = output_parser.get_format_instructions()
+            messages = prompt_template.format_prompt(context=get_context(employees), query=chat_message, format_instruction=format_instruction).to_messages()
 
-    Args:
-        docs: 従業員情報ファイルの読み込みデータ
-        docs_history: 問い合わせ対応履歴ファイルの読み込みデータ
+            session_llm = getattr(st.session_state, "llm", None)
+            if session_llm is not None:
+                resp = session_llm(messages)
+                employee_ids = output_parser.parse(getattr(resp, 'content', '') or str(resp))
+        except Exception as e:
+            logger.warning(f"Failed to get employee ids via session LLM: {e}")
 
-    Returns:
-        従業員情報と問い合わせ対応履歴の結合テキスト
-    """
-
-    docs_all = []
-    for row in docs:
-        # 従業員IDの取得
-        row_lines = row.page_content.split("\n")
-        row_dict = {item.split(": ")[0]: item.split(": ")[1] for item in row_lines}
-        employee_id = row_dict["従業員ID"]
-
-        doc = ""
-
-        # 取得した従業員IDに紐づく問い合わせ対応履歴を取得
-        same_employee_inquiries = []
-        for row_history in docs_history:
-            row_history_lines = row_history.page_content.split("\n")
-            row_history_dict = {item.split(": ")[0]: item.split(": ")[1] for item in row_history_lines}
-            if row_history_dict["従業員ID"] == employee_id:
-                same_employee_inquiries.append(row_history_dict)
-
-        new_doc = Document()
-
-        if same_employee_inquiries:
-            # 従業員情報と問い合わせ対応履歴の結合テキストを生成
-            doc += "【従業員情報】\n"
-            row_data = "\n".join(row_lines)
-            doc += row_data + "\n=================================\n"
-            doc += "【この従業員の問い合わせ対応履歴】\n"
-            for inquiry_dict in same_employee_inquiries:
-                for key, value in inquiry_dict.items():
-                    doc += f"{key}: {value}\n"
-                doc += "---------------\n"
-            new_doc.page_content = doc
+        # LLM が何も返さなかった場合は retriever 上位を代替採用
+        if not employee_ids:
+            logger.info("No employee_ids from LLM; falling back to top retriever candidates for mentions")
+            try:
+                target_employees = employees[: ct.TOP_K]
+            except Exception:
+                target_employees = []
         else:
-            new_doc.page_content = row.page_content
-        new_doc.metadata = {}
+            target_employees = get_target_employees(employees, employee_ids)
 
-        docs_all.append(new_doc)
-    
-    return docs_all
+        slack_ids = get_slack_ids(target_employees)
+        slack_id_text = create_slack_id_text(slack_ids)
+        context_for_prompt = get_context(target_employees)
 
+        now_datetime = get_datetime()
+        # requester precedence: caller override -> session -> default
+        requester = requester_override or getattr(st.session_state, 'user_name', None) or '山田太郎'
+
+        prompt = PromptTemplate(
+            input_variables=["slack_id_text", "query", "context", "now_datetime", "requester"],
+            template=ct.SYSTEM_PROMPT_NOTICE_SLACK,
+        )
+        prompt_message = prompt.format(slack_id_text=slack_id_text, query=chat_message, context=context_for_prompt, now_datetime=now_datetime, requester=requester)
+
+        # Agent executor があっても、バックグラウンド実行時の挙動差異で二重投稿や
+        # 不要なメンションが発生することがあるため、ここでは agent_executor による直接投稿は行わず
+        # 以降の LLM/WebClient フローで必ず本文を生成・後処理して投稿します。
+        if agent_executor is not None:
+            logger.info("Agent executor available but skipping direct agent posting to avoid duplicate mentions; using LLM/WebClient flow")
+
+        # 次に LLM でメッセージ本体を生成（セッション LLM、なければローカル ChatOpenAI を作成）
+        llm_for_generation = getattr(st.session_state, "llm", None)
+        if llm_for_generation is None:
+            try:
+                llm_for_generation = ChatOpenAI(model_name=ct.MODEL, temperature=ct.TEMPERATURE, streaming=False)
+                logger.info("Created local ChatOpenAI instance for background generation")
+            except Exception as e:
+                logger.exception(f"Failed to create local ChatOpenAI for background generation: {e}")
+                llm_for_generation = None
+
+        generated_text = None
+        if llm_for_generation is not None:
+            try:
+                # try chat-style call first
+                try:
+                    gen_resp = llm_for_generation([
+                        {"role": "system", "content": "あなたはSlackで投稿するための文章を生成するアシスタントです。出力はプレーンテキストのみとしてください。"},
+                        {"role": "user", "content": prompt_message},
+                    ])
+                    generated_text = getattr(gen_resp, 'content', None) or (gen_resp[0] if isinstance(gen_resp, (list, tuple)) and gen_resp else None) or str(gen_resp)
+                except Exception:
+                    gen_resp = llm_for_generation(prompt_message)
+                    generated_text = getattr(gen_resp, 'content', None) or str(gen_resp)
+            except Exception as e:
+                logger.warning(f"LLM generation failed: {e}; falling back to concise summary")
+
+        # メンションテキスト（SlackのユーザーIDで <@U...> 形式）、重複排除
+        mention_list = []
+        seen = set()
+        for s in slack_ids:
+            if not s:
+                continue
+            if s in seen:
+                continue
+            seen.add(s)
+            mention_list.append(f"<@{s}>")
+        mention_text = " ".join(mention_list)
+
+        if generated_text:
+            post_body = generated_text
+            # 生成済みテキストに既にメンション行や生の SlackID 行、あるいは @表示（表示名含む）が含まれている場合は削除
+            cleaned_lines = []
+            for line in post_body.splitlines():
+                stripped = line.strip()
+                # Skip lines that are only mentions like '<@U...' or raw IDs like 'U09...'
+                if not stripped:
+                    continue
+                if stripped.startswith('<@') and '>' in stripped:
+                    continue
+                if stripped.startswith('@'):
+                    # Any line starting with @ (display mention) should be removed to avoid duplicate mentions
+                    continue
+                # Remove inline bare U... tokens anywhere in line
+                # Replace occurrences of tokens that look like U0.. with empty string
+                import re
+                line = re.sub(r'\bU[0-9A-Z]{6,}\b', '', line)
+                # After removals, skip if line is empty/only punctuation
+                if line.strip() == '' or all(c in ' ,。、.-–—()[]{}' for c in line.strip()):
+                    continue
+                cleaned_lines.append(line)
+            post_body = '\n'.join(cleaned_lines).strip()
+        else:
+            safe_query = (chat_message or "(内容がありません)").strip()
+            safe_requester = (requester or "不明な依頼者")
+            safe_datetime = now_datetime or ""
+            safe_context = (context_for_prompt or "").strip()
+            if len(safe_context) > 800:
+                safe_context = safe_context[:800] + "... (省略)"
+
+            post_body_lines = [
+                "以下のお問い合わせを受け付けました。担当者の確認をお願いします。",
+                "",
+                f"・問い合わせ内容: {safe_query}",
+                f"・問い合わせ者: {safe_requester}",
+                f"・受付日時: {safe_datetime}",
+            ]
+            if safe_context:
+                post_body_lines.append("")
+                post_body_lines.append("・参照用（該当従業員情報の抜粋）:")
+                post_body_lines.append(safe_context)
+
+            post_body = "\n".join(post_body_lines)
+
+        # メンションは先頭に一度だけ付与し、本文に問い合わせ者情報があるか確認
+        # もしpromptや生成文が問い合わせ者を固定の "山田太郎" のまま出力してしまう場合は
+        # セッションの requester を優先して置換する
+        if requester and post_body:
+            # 強制的に「問い合わせ者」行を置換する: '・問い合わせ者: ...' を探して上書き
+            import re
+            def replace_requester_line(text, name):
+                pattern = r"(^\s*・問い合わせ者:\s*).*$"
+                if re.search(pattern, text, flags=re.MULTILINE):
+                    return re.sub(pattern, rf"\1{name}", text, flags=re.MULTILINE)
+                # フォールバック: 単純置換
+                return text.replace('山田太郎', name).replace('{requester}', name)
+
+            post_body = replace_requester_line(post_body, requester)
+
+        post_text = f"{mention_text}\n\n{post_body}" if mention_text else post_body
+
+        # 投稿先チャンネルは環境変数で上書き可能。なければ 'general' を使う。
+        channel = os.getenv("SLACK_CHANNEL", "general")
+        try:
+            token = os.getenv("SLACK_USER_TOKEN")
+            client = WebClient(token=token)
+
+            logger.info(f"Attempting WebClient.auth_test with token set={bool(token)}")
+            try:
+                auth = client.auth_test()
+                logger.info(f"auth_test: {auth}")
+            except Exception as e:
+                logger.warning(f"auth_test failed: {e}")
+
+            logger.info(f"Attempting WebClient.chat_postMessage to channel={channel} with token set={bool(token)}")
+            resolved_channel = channel
+            try:
+                if not channel.startswith(("C", "G", "U", "D", "#")):
+                    convs = client.conversations_list(types="public_channel,private_channel")
+                    channels = convs.get("channels", []) if isinstance(convs, dict) else []
+                    for ch in channels:
+                        if ch.get("name") == channel or ch.get("name_normalized") == channel:
+                            resolved_channel = ch.get("id")
+                            break
+            except Exception as e:
+                logger.warning(f"Could not resolve channel name to id: {e}; will try posting with given channel value")
+
+            # Final safeguard: replace any remaining hardcoded placeholders with the requester
+            if requester:
+                post_text = post_text.replace('山田太郎', requester).replace('{requester}', requester)
+
+            logger.info(f"Final Slack post_text (truncated 1000 chars): {post_text[:1000]}")
+            logger.info(f"Requester used for notification: {requester}")
+            resp = client.chat_postMessage(channel=resolved_channel, text=post_text)
+            try:
+                ok = resp.get("ok", None) if hasattr(resp, 'get') else getattr(resp, 'ok', None)
+            except Exception:
+                ok = None
+            logger.info(f"WebClient.postMessage response ok={ok}")
+        except Exception as e:
+            logger.exception(f"Slack WebClient fallback failed: {e}")
+
+        return ct.CONTACT_THANKS_MESSAGE
 
 
 def get_target_employees(employees, employee_ids):
@@ -455,7 +770,7 @@ def get_target_employees(employees, employee_ids):
                 continue
             duplicate_check.append(employee_id)
             target_employees.append(employee)
-    
+
     return target_employees
 
 

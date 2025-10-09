@@ -37,11 +37,10 @@ except Exception as e:
     st.error(utils.build_error_message(ct.INITIALIZE_ERROR_MESSAGE), icon=ct.ERROR_ICON)
     st.stop()
 
-# アプリ起動時のログ出力
-if not "initialized" in st.session_state:
+# アプリ起動時のログ
+if "initialized" not in st.session_state:
     st.session_state.initialized = True
     logger.info(ct.APP_BOOT_MESSAGE)
-
 
 ############################################################
 # 初期表示
@@ -130,25 +129,34 @@ if chat_message:
                     break
 
     res_box = st.empty()
-    try:
-        if use_faq:
-            # FAQで解決した場合は、その内容を回答として表示し、LLM呼び出しはスキップ
-            result = f"FAQで解決しました:\n{chosen_faq['question']}\n{chosen_faq['snippet']}\n参照: {chosen_faq.get('url','') }"
-        else:
-            if st.session_state.contact_mode == ct.CONTACT_MODE_OFF:
-                # 重いリソース（RAGチェーンやAgent）が未作成の場合は遅延初期化
+    if use_faq:
+        # FAQで解決した場合は、その内容を回答として表示し、LLM呼び出しはスキップ
+        result = f"FAQで解決しました:\n{chosen_faq['question']}\n{chosen_faq['snippet']}\n参照: {chosen_faq.get('url','') }"
+    else:
+        if st.session_state.contact_mode == ct.CONTACT_MODE_OFF:
+            # 重いリソース（RAGチェーンやAgent）が未作成の場合は遅延初期化
+            try:
                 if "rag_chain" not in st.session_state or "agent_executor" not in st.session_state:
                     initialize_module.initialize_heavy_resources()
                 with st.spinner(ct.SPINNER_TEXT):
                     result = utils.execute_agent_or_chain(chat_message)
-            else:
-                # 問い合わせモードは Slack 通知。Slack 用の Agent を作る処理は notice_slack 内で行われるため遅延化済み
-                with st.spinner(ct.SPINNER_CONTACT_TEXT):
-                    result = utils.notice_slack(chat_message)
-    except Exception as e:
-        logger.error(f"{ct.MAIN_PROCESS_ERROR_MESSAGE}\n{e}")
-        st.error(utils.build_error_message(ct.MAIN_PROCESS_ERROR_MESSAGE), icon=ct.ERROR_ICON)
-        st.stop()
+            except Exception as e:
+                # 初期化や実行で失敗した場合は詳しくログに残し、まずは軽量なLLMでの回答生成を試みる
+                logger.exception(f"Failed to generate answer via agent/chain: {e}")
+                try:
+                    result = utils.generate_simple_answer(chat_message)
+                except Exception as e2:
+                    logger.exception(f"Fallback simple generation also failed: {e2}")
+                    result = "申し訳ございません。回答の生成中にエラーが発生しました。しばらく経ってから再度お試しください。"
+        else:
+            # 問い合わせモード: ユーザーには即時にサンクスメッセージを表示し、
+            # Slack 送信はバックグラウンドで非同期に実行してユーザーを待たせない。
+            result = ct.CONTACT_THANKS_MESSAGE
+            # 非同期に通知を送る（失敗時はログのみ）
+            import threading
+            # capture requester now to avoid accessing st.session_state from background thread
+            requester_for_thread = st.session_state.get('user_name', None)
+            threading.Thread(target=utils.notice_slack, args=(chat_message, requester_for_thread), daemon=True).start()
     
     # ==========================================
     # 3. 古い会話履歴を削除
