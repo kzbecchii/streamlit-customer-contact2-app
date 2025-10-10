@@ -105,7 +105,18 @@ def create_rag_chain(db_name):
     embeddings = OpenAIEmbeddings()
 
     # DB ごとに固有の persist_directory を使う（db_name がパスのケースを想定）
-    persist_dir = os.path.normpath(db_name)
+    # 明示的な定数がある場合はそれを優先して使う
+    if db_name == ct.DB_SERVICE_PATH:
+        persist_dir = os.path.normpath(ct.DB_SERVICE_PERSIST_DIR)
+    elif db_name == ct.DB_COMPANY_PATH:
+        persist_dir = os.path.normpath(ct.DB_COMPANY_PERSIST_DIR)
+    elif db_name == ct.DB_CUSTOMER_PATH:
+        persist_dir = os.path.normpath(ct.DB_CUSTOMER_PERSIST_DIR)
+    elif db_name == ct.DB_ALL_PATH:
+        persist_dir = os.path.normpath(ct.DB_ALL_PERSIST_DIR)
+    else:
+        # フォールバック: 引数の db_name をそのままパスと見なす
+        persist_dir = os.path.normpath(db_name)
     try:
         os.makedirs(persist_dir, exist_ok=True)
     except Exception:

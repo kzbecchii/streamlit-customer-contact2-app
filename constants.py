@@ -85,7 +85,12 @@ RAG_TOP_FOLDER_PATH = "./data/rag"
 DB_ALL_PATH = "./.db_all"
 DB_COMPANY_PATH = "./.db_company"
 DB_SERVICE_PATH = "./.db_service"
+DB_SERVICE_PERSIST_DIR = "./.db_service_index"
 DB_CUSTOMER_PATH = "./.db_customer"
+DB_COMPANY_PERSIST_DIR = "./.db_company"
+DB_CUSTOMER_PERSIST_DIR = "./.db_customer"
+DB_ALL_PERSIST_DIR = "./.db_all"
+DB_FAQ_PATH = "./.db_faq/faq.db"
 
 DB_NAMES = {
     DB_COMPANY_PATH: f"{RAG_TOP_FOLDER_PATH}/company",
