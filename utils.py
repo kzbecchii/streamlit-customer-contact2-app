@@ -137,6 +137,44 @@ def create_rag_chain(db_name):
 
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
 
+    # Sanity check: ensure retriever can actually find documents.
+    # Sometimes a persisted Chroma directory exists but contains no usable vectors
+    # (e.g. due to process isolation or incomplete write). Probe the retriever
+    # with a short excerpt from the first splitted doc (if available). If the
+    # probe returns no results while we do have splitted_docs, recreate the
+    # index from documents and persist again.
+    try:
+        probe_ok = True
+        if splitted_docs:
+            probe_text = None
+            # pick first non-empty chunk
+            for d in splitted_docs:
+                text = getattr(d, 'page_content', None) or ''
+                if text and text.strip():
+                    probe_text = text[:200]
+                    break
+            if probe_text:
+                try:
+                    probe_results = retriever.get_relevant_documents(probe_text)
+                except Exception:
+                    # Some retriever implementations use invoke()
+                    try:
+                        probe_results = retriever.invoke(probe_text)
+                    except Exception:
+                        probe_results = []
+                # normalize to list
+                if not probe_results:
+                    logger.info({"retriever_probe": "no_results", "persist_dir": persist_dir, "doc_count": len(splitted_docs)})
+                    # Rebuild index from documents to ensure vectors exist
+                    try:
+                        logger.info({"rebuilding_chroma_from_documents": persist_dir})
+                        db = Chroma.from_documents(splitted_docs, embedding=embeddings, persist_directory=persist_dir)
+                        retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
+                    except Exception as e:
+                        logger.warning({"rebuild_failed": str(e), "persist_dir": persist_dir})
+    except Exception as e:
+        logger.warning({"retriever_probe_exception": str(e)})
+
     question_generator_template = ct.SYSTEM_PROMPT_CREATE_INDEPENDENT_TEXT
     question_generator_prompt = ChatPromptTemplate.from_messages(
         [

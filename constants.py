@@ -364,3 +364,8 @@ RETRIEVER_WEIGHTS = [0.6, 0.4]
 
 # スピナー表示テキスト
 SPINNER_TEXT = "回答を生成しています... 少々お待ちください。"
+
+# 環境変数で上書き可能なフラグ: True の場合は RAG のインデックスを常に再作成します。
+# コンテナやホスティング環境でローカル persist ディレクトリが共有されない場合に有効です。
+import os
+FORCE_RECREATE_RAG = os.getenv("FORCE_RECREATE_RAG", "true").lower() in ("1", "true", "yes")
