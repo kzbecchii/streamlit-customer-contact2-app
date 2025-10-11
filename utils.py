@@ -16,7 +16,11 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
 from langchain.schema import HumanMessage, AIMessage
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_community.vectorstores import Chroma
+# Chroma moved to langchain-chroma package; use it if available, otherwise fall back
+try:
+    from langchain_chroma import Chroma  # type: ignore
+except Exception:
+    from langchain_community.vectorstores import Chroma
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
@@ -547,13 +551,14 @@ def generate_simple_answer(chat_message: str) -> str:
     try:
         # まず chat-style の呼び出しを試す
         try:
-            gen = llm([
+            # use invoke() instead of calling the model directly to avoid deprecation
+            gen = llm.invoke([
                 {"role": "system", "content": "あなたは社内文書を元に顧客の問い合わせに回答するアシスタントです。社内データが参照できない場合は一般的な知見に基づいて回答してください。出力は日本語で記載してください。"},
                 {"role": "user", "content": chat_message},
             ])
             text = getattr(gen, 'content', None) or (gen[0] if isinstance(gen, (list, tuple)) and gen else None) or str(gen)
         except Exception:
-            gen = llm(chat_message)
+            gen = llm.invoke(chat_message)
             text = getattr(gen, 'content', None) or str(gen)
 
         # 空や None の場合はエラーメッセージにフォールバック
@@ -655,7 +660,7 @@ def notice_slack(chat_message, requester_override=None):
     llm_for_agent = getattr(st.session_state, "llm", None)
     if llm_for_agent is not None:
         try:
-            employee_id_response = llm_for_agent(messages)
+            employee_id_response = llm_for_agent.invoke(messages)
             employee_ids = output_parser.parse(employee_id_response.content)
         except Exception as e:
             logger = logging.getLogger(ct.LOGGER_NAME)
@@ -719,7 +724,7 @@ def notice_slack(chat_message, requester_override=None):
 
             session_llm = getattr(st.session_state, "llm", None)
             if session_llm is not None:
-                resp = session_llm(messages)
+                resp = session_llm.invoke(messages)
                 employee_ids = output_parser.parse(getattr(resp, 'content', '') or str(resp))
         except Exception as e:
             logger.warning(f"Failed to get employee ids via session LLM: {e}")
@@ -769,13 +774,13 @@ def notice_slack(chat_message, requester_override=None):
             try:
                 # try chat-style call first
                 try:
-                    gen_resp = llm_for_generation([
+                    gen_resp = llm_for_generation.invoke([
                         {"role": "system", "content": "あなたはSlackで投稿するための文章を生成するアシスタントです。出力はプレーンテキストのみとしてください。"},
                         {"role": "user", "content": prompt_message},
                     ])
                     generated_text = getattr(gen_resp, 'content', None) or (gen_resp[0] if isinstance(gen_resp, (list, tuple)) and gen_resp else None) or str(gen_resp)
                 except Exception:
-                    gen_resp = llm_for_generation(prompt_message)
+                    gen_resp = llm_for_generation.invoke(prompt_message)
                     generated_text = getattr(gen_resp, 'content', None) or str(gen_resp)
             except Exception as e:
                 logger.warning(f"LLM generation failed: {e}; falling back to concise summary")
