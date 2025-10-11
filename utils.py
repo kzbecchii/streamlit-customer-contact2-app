@@ -367,11 +367,86 @@ def execute_agent_or_chain(chat_message):
             response = result.get("output") if isinstance(result, dict) else result
     # AIエージェントを利用しない場合
     else:
-        # RAGのChainを実行
-        result = st.session_state.rag_chain.invoke({"input": chat_message, "chat_history": st.session_state.chat_history})
-        # 会話履歴への追加
-        st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=result["answer"])])
-        response = result["answer"]
+        # まずは全体用のRAGチェーンを試す（st.session_state.rag_chain が存在しない場合は次に移る）
+        response = None
+        tried_chains = []
+        chains_to_try = []
+        # 優先順: 全体 -> 会社 -> サービス -> 顧客
+        if isinstance(st.session_state.get('rag_chain', None), object):
+            chains_to_try.append(('all', st.session_state.rag_chain))
+        if isinstance(st.session_state.get('company_doc_chain', None), object):
+            chains_to_try.append(('company', st.session_state.company_doc_chain))
+        if isinstance(st.session_state.get('service_doc_chain', None), object):
+            chains_to_try.append(('service', st.session_state.service_doc_chain))
+        if isinstance(st.session_state.get('customer_doc_chain', None), object):
+            chains_to_try.append(('customer', st.session_state.customer_doc_chain))
+
+        for name, chain in chains_to_try:
+            tried_chains.append(name)
+            try:
+                result = chain.invoke({"input": chat_message, "chat_history": st.session_state.chat_history})
+                # Try to extract answer
+                ans = result.get("answer") if isinstance(result, dict) else getattr(result, 'answer', None)
+
+                # Extract source documents for logging/debugging (LangChain chains often return 'source_documents' or 'sources')
+                sources = None
+                if isinstance(result, dict):
+                    sources = result.get('source_documents') or result.get('sources') or result.get('source_documents')
+                else:
+                    # some chain implementations attach source_documents attribute
+                    sources = getattr(result, 'source_documents', None) or getattr(result, 'sources', None)
+
+                # Log top sources for this chain
+                try:
+                    if sources:
+                        src_list = []
+                        for i, doc in enumerate(sources[: ct.TOP_K]):
+                            snippet = getattr(doc, 'page_content', None) or str(doc)
+                            snippet = snippet.replace('\n', ' ')[:200]
+                            meta = getattr(doc, 'metadata', {})
+                            src_list.append({
+                                'index': i,
+                                'snippet': snippet,
+                                'metadata': meta,
+                            })
+                        logger.info({f"rag_sources_{name}": src_list})
+                    else:
+                        logger.info({f"rag_sources_{name}": "no_source_documents"})
+                except Exception as e:
+                    logger.warning(f"Failed to log source documents for chain '{name}': {e}")
+
+                # None や 空文字の場合は次へ
+                if not ans:
+                    continue
+                # RAG が NO_DOC_MATCH_MESSAGE を返した場合は次のチェーンを試す
+                if ans == ct.NO_DOC_MATCH_MESSAGE:
+                    continue
+                # 有効な回答が得られた場合は会話履歴へ追加して終了
+                st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=ans)])
+                response = ans
+                break
+            except Exception as e:
+                logger.warning(f"RAG chain '{name}' invocation failed: {e}; trying next chain")
+                continue
+
+        # どのチェーンでも情報が見つからなかった場合、軽量LLMへフォールバックして回答を生成する
+        if response is None:
+            logger.info(f"No RAG chain returned a valid answer (tried: {tried_chains}); falling back to simple LLM generation")
+            try:
+                response = generate_simple_answer(chat_message)
+            except Exception as e:
+                logger.exception(f"Fallback simple generation failed: {e}")
+                response = ct.NO_DOC_MATCH_MESSAGE
+
+            # 会話履歴への追加（失敗しないように安全に実行）
+            try:
+                if isinstance(st.session_state.chat_history, list):
+                    st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=response)])
+                else:
+                    st.session_state.chat_history = [HumanMessage(content=chat_message), AIMessage(content=response)]
+            except Exception:
+                # 履歴更新に失敗しても回答は返す
+                pass
 
     # LLMから参照先のデータを基にした回答が行われた場合のみ、フィードバックボタンを表示
     if response != ct.NO_DOC_MATCH_MESSAGE:
