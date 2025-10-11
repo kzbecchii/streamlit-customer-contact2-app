@@ -175,6 +175,11 @@ if chat_message:
             logger.error(f"{ct.DISP_ANSWER_ERROR_MESSAGE}\n{e}")
             st.error(utils.build_error_message(ct.DISP_ANSWER_ERROR_MESSAGE), icon=ct.ERROR_ICON)
             st.stop()
+    # 回答の直後に重いリソース（RAGチェーン等）を再初期化して、別タブや次の問い合わせで最新の persisted DB を利用できるようにする
+    try:
+        initialize_module.initialize_heavy_resources()
+    except Exception as e:
+        logger.warning(f"Reinitialize heavy resources after response failed: {e}")
     
     # ==========================================
     # 5. 会話ログへの追加
