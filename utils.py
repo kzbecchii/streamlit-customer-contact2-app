@@ -261,8 +261,7 @@ def run_company_doc_chain(param):
     """
     # 会社に関するデータ参照に特化したChainを実行してLLMからの回答取得
     ai_msg = st.session_state.company_doc_chain.invoke({"input": param, "chat_history": st.session_state.chat_history})
-    # 会話履歴への追加
-    st.session_state.chat_history.extend([HumanMessage(content=param), AIMessage(content=ai_msg["answer"])])
+    # run_*_doc_chain は回答のみを返す。会話履歴への追加は呼び出し元で一元管理する。
 
     return ai_msg["answer"]
 
@@ -279,9 +278,6 @@ def run_service_doc_chain(param):
     # サービスに関するデータ参照に特化したChainを実行してLLMからの回答取得
     ai_msg = st.session_state.service_doc_chain.invoke({"input": param, "chat_history": st.session_state.chat_history})
 
-    # 会話履歴への追加
-    st.session_state.chat_history.extend([HumanMessage(content=param), AIMessage(content=ai_msg["answer"])])
-
     return ai_msg["answer"]
 
 def run_customer_doc_chain(param):
@@ -296,9 +292,6 @@ def run_customer_doc_chain(param):
     """
     # 顧客とのやり取りに関するデータ参照に特化したChainを実行してLLMからの回答取得
     ai_msg = st.session_state.customer_doc_chain.invoke({"input": param, "chat_history": st.session_state.chat_history})
-
-    # 会話履歴への追加
-    st.session_state.chat_history.extend([HumanMessage(content=param), AIMessage(content=ai_msg["answer"])])
 
     return ai_msg["answer"]
 
@@ -380,7 +373,8 @@ def execute_agent_or_chain(chat_message):
             chains_to_try.append(('service', st.session_state.service_doc_chain))
         if isinstance(st.session_state.get('customer_doc_chain', None), object):
             chains_to_try.append(('customer', st.session_state.customer_doc_chain))
-
+        # Keep a candidate answer that may have no sources (use only if no sourced answers found)
+        no_source_candidate = None
         for name, chain in chains_to_try:
             tried_chains.append(name)
             try:
@@ -421,17 +415,37 @@ def execute_agent_or_chain(chat_message):
                 # RAG が NO_DOC_MATCH_MESSAGE を返した場合は次のチェーンを試す
                 if ans == ct.NO_DOC_MATCH_MESSAGE:
                     continue
-                # 有効な回答が得られた場合は会話履歴へ追加して終了
-                st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=ans)])
-                response = ans
-                break
+
+                # ソースが存在する回答を最優先で採用
+                if sources and len(sources) > 0:
+                    st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=ans)])
+                    response = ans
+                    break
+
+                # ソース無しだが有効な回答は二次候補として保持（ただし直ちに返さない）
+                if no_source_candidate is None:
+                    no_source_candidate = ans
+
+                # さらに良い候補を探すために次のチェーンへ進む
+                continue
             except Exception as e:
                 logger.warning(f"RAG chain '{name}' invocation failed: {e}; trying next chain")
                 continue
+        # いずれのチェーンにもソース付き回答が無かった場合は、ソース無しで得られた回答を使う
+        if response is None and no_source_candidate is not None:
+            logger.info(f"Using no-source candidate answer after trying chains (tried: {tried_chains})")
+            response = no_source_candidate
+            try:
+                if isinstance(st.session_state.chat_history, list):
+                    st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=response)])
+                else:
+                    st.session_state.chat_history = [HumanMessage(content=chat_message), AIMessage(content=response)]
+            except Exception:
+                pass
 
-        # どのチェーンでも情報が見つからなかった場合、軽量LLMへフォールバックして回答を生成する
+        # どのチェーンでも全く候補が得られなかった場合、軽量LLMへフォールバックして回答を生成する
         if response is None:
-            logger.info(f"No RAG chain returned a valid answer (tried: {tried_chains}); falling back to simple LLM generation")
+            logger.info(f"No RAG chain returned any valid answer (tried: {tried_chains}); falling back to simple LLM generation")
             try:
                 response = generate_simple_answer(chat_message)
             except Exception as e:
