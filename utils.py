@@ -365,19 +365,40 @@ def execute_agent_or_chain(chat_message):
         tried_chains = []
         chains_to_try = []
         # 優先順: 全体 -> 会社 -> サービス -> 顧客
-        if isinstance(st.session_state.get('rag_chain', None), object):
-            chains_to_try.append(('all', st.session_state.rag_chain))
-        if isinstance(st.session_state.get('company_doc_chain', None), object):
-            chains_to_try.append(('company', st.session_state.company_doc_chain))
-        if isinstance(st.session_state.get('service_doc_chain', None), object):
-            chains_to_try.append(('service', st.session_state.service_doc_chain))
-        if isinstance(st.session_state.get('customer_doc_chain', None), object):
-            chains_to_try.append(('customer', st.session_state.customer_doc_chain))
+        # Use persisted DB paths as a source of truth and allow on-demand recreation
+        db_map = {
+            'all': ct.DB_ALL_PATH,
+            'company': ct.DB_COMPANY_PATH,
+            'service': ct.DB_SERVICE_PATH,
+            'customer': ct.DB_CUSTOMER_PATH,
+        }
+        # build list of (name, chain_obj, db_path) for attempts; chain_obj may be None
+        chains_to_try = [
+            ('all', st.session_state.get('rag_chain', None), db_map['all']),
+            ('company', st.session_state.get('company_doc_chain', None), db_map['company']),
+            ('service', st.session_state.get('service_doc_chain', None), db_map['service']),
+            ('customer', st.session_state.get('customer_doc_chain', None), db_map['customer']),
+        ]
         # Keep a candidate answer that may have no sources (use only if no sourced answers found)
         no_source_candidate = None
-        for name, chain in chains_to_try:
+        for name, chain, db_path in chains_to_try:
             tried_chains.append(name)
             try:
+                # If chain object is missing for this session/tab, recreate it from persisted DB
+                if chain is None:
+                    try:
+                        logger.info({f"recreating_chain_for_session": name, 'db_path': db_path})
+                        chain = create_rag_chain(db_path)
+                        # save into session_state so subsequent calls in same session reuse it
+                        if name == 'all':
+                            st.session_state.rag_chain = chain
+                        else:
+                            st.session_state[f"{name}_doc_chain"] = chain
+                    except Exception as e:
+                        logger.warning(f"Failed to recreate chain '{name}' on-demand: {e}")
+                        # continue to next chain
+                        continue
+
                 result = chain.invoke({"input": chat_message, "chat_history": st.session_state.chat_history})
                 # Try to extract answer
                 ans = result.get("answer") if isinstance(result, dict) else getattr(result, 'answer', None)
@@ -406,6 +427,38 @@ def execute_agent_or_chain(chat_message):
                         logger.info({f"rag_sources_{name}": src_list})
                     else:
                         logger.info({f"rag_sources_{name}": "no_source_documents"})
+                        # If no sources were returned, try to recreate chain once (fresh retriever)
+                        # This helps when another session/tab created/updated the persisted DB earlier
+                        try:
+                            logger.info({f"recreate_retry_chain": name, 'db_path': db_path})
+                            fresh_chain = create_rag_chain(db_path)
+                            # update session_state and re-invoke once
+                            if name == 'all':
+                                st.session_state.rag_chain = fresh_chain
+                            else:
+                                st.session_state[f"{name}_doc_chain"] = fresh_chain
+                            # re-invoke
+                            result2 = fresh_chain.invoke({"input": chat_message, "chat_history": st.session_state.chat_history})
+                            ans2 = result2.get("answer") if isinstance(result2, dict) else getattr(result2, 'answer', None)
+                            sources2 = result2.get('source_documents') or result2.get('sources') if isinstance(result2, dict) else getattr(result2, 'source_documents', None) or getattr(result2, 'sources', None)
+                            if sources2:
+                                # log and adopt this result in place of previous
+                                src_list = []
+                                for i, doc in enumerate(sources2[: ct.TOP_K]):
+                                    snippet = getattr(doc, 'page_content', None) or str(doc)
+                                    snippet = snippet.replace('\n', ' ')[:200]
+                                    meta = getattr(doc, 'metadata', {})
+                                    src_list.append({
+                                        'index': i,
+                                        'snippet': snippet,
+                                        'metadata': meta,
+                                    })
+                                logger.info({f"rag_sources_{name}": src_list})
+                                ans = ans2
+                                sources = sources2
+                                result = result2
+                        except Exception as e:
+                            logger.warning(f"Recreate+reinvoke for chain '{name}' failed: {e}")
                 except Exception as e:
                     logger.warning(f"Failed to log source documents for chain '{name}': {e}")
 
